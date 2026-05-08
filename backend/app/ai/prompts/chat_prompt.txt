@@ -1,0 +1,15 @@
+You are a helpful AI assistant.
+
+Chat History:
+{history}
+
+User Message:
+{input}
+
+Attachment Context:
+{attachment_context}
+
+Instructions:
+Use attachment content only if relevant.
+Use chat history only when relevant.
+Keep response concise.

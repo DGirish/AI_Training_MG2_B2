@@ -1,0 +1,205 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Supabase Schema Migration</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        pre {
+            background: white;
+            padding: 20px;
+            border-radius: 5px;
+            overflow-x: auto;
+            border-left: 4px solid #2563eb;
+        }
+        .step {
+            background: white;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+            border-left: 4px solid #10b981;
+        }
+        h1 {
+            color: #1f2937;
+            border-bottom: 3px solid #2563eb;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #374151;
+            margin-top: 30px;
+        }
+        .copy-btn {
+            background: #2563eb;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .copy-btn:hover {
+            background: #1d4ed8;
+        }
+        .success {
+            background: #d1fae5;
+            border-left-color: #10b981;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Supabase Schema Migration Guide</h1>
+    
+    <div class="success">
+        <strong>Info:</strong> Your network is blocking direct database connections.
+        Use this browser-based method instead.
+    </div>
+    
+    <h2>Step 1: Copy Your SQL Schema</h2>
+    <p>Click "Copy to Clipboard" to copy the SQL:</p>
+    <button class="copy-btn" onclick="copySql()">Copy SQL to Clipboard</button>
+    <pre id="sql-content">-- Profiles table (synced with Supabase auth)
+CREATE TABLE IF NOT EXISTS profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users (id) ON DELETE CASCADE,
+    email TEXT UNIQUE NOT NULL,
+    full_name TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Chat threads table
+CREATE TABLE IF NOT EXISTS chat_threads (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Chat messages table
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id UUID NOT NULL REFERENCES chat_threads (id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_chat_threads_user_id ON chat_threads (user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_id ON chat_messages (thread_id, created_at ASC);
+
+-- Enable Row Level Security
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chat_threads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
+
+-- RLS policies for profiles
+CREATE POLICY "Users can view own profile" ON profiles
+    FOR SELECT USING (auth.uid() = id);
+
+CREATE POLICY "Users can update own profile" ON profiles
+    FOR UPDATE USING (auth.uid() = id);
+
+-- RLS policies for chat_threads
+CREATE POLICY "Users can view own threads" ON chat_threads
+    FOR SELECT USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can create threads" ON chat_threads
+    FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update own threads" ON chat_threads
+    FOR UPDATE USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete own threads" ON chat_threads
+    FOR DELETE USING (auth.uid() = user_id);
+
+-- RLS policies for chat_messages
+CREATE POLICY "Users can view messages in own threads" ON chat_messages
+    FOR SELECT USING (
+        auth.uid() IN (
+            SELECT user_id FROM chat_threads WHERE id = chat_messages.thread_id
+        )
+    );
+
+CREATE POLICY "Users can insert messages in own threads" ON chat_messages
+    FOR INSERT WITH CHECK (
+        auth.uid() = user_id AND
+        auth.uid() IN (
+            SELECT user_id FROM chat_threads WHERE id = thread_id
+        )
+    );
+</pre>
+    
+    <h2>Step 2: Go to Supabase</h2>
+    <p><a href="https://app.supabase.com/" target="_blank">Open Supabase Dashboard</a></p>
+    
+    <h2>Step 3: Open SQL Editor</h2>
+    <div class="step">
+        1. Login to Supabase<br>
+        2. Select project: <code>mpsocvgczkkizuhdwcsa</code><br>
+        3. Left sidebar > SQL Editor<br>
+        4. Click "New Query" button
+    </div>
+    
+    <h2>Step 4: Paste SQL</h2>
+    <div class="step">
+        1. Right-click in query editor<br>
+        2. Select "Paste" or use Ctrl+V<br>
+        3. Paste the SQL you copied above
+    </div>
+    
+    <h2>Step 5: Execute</h2>
+    <div class="step">
+        1. Click blue "Run" button<br>
+        2. Or press Ctrl+Enter
+    </div>
+    
+    <h2>Step 6: Verify</h2>
+    <div class="step">
+        1. Wait for success message<br>
+        2. Go to "Table Editor" tab<br>
+        3. You should see 3 new tables:
+        <ul>
+            <li>profiles</li>
+            <li>chat_threads</li>
+            <li>chat_messages</li>
+        </ul>
+    </div>
+    
+    <h2>Next: Start Your Application</h2>
+    <pre>
+# 1. Add to .env
+SECRET_KEY=your-32-char-secret-key
+
+# 2. Start backend
+uvicorn app.main:app --app-dir backend --reload
+
+# 3. Start frontend
+cd frontend && npm run dev
+
+# 4. Open browser
+http://127.0.0.1:5173/
+    </pre>
+    
+    <script>
+        function copySql() {
+            const sqlContent = document.getElementById('sql-content').innerText;
+            navigator.clipboard.writeText(sqlContent).then(() => {
+                alert('SQL copied to clipboard!');
+            }).catch(() => {
+                alert('Failed to copy. Please select and copy manually.');
+            });
+        }
+    </script>
+</body>
+</html>
