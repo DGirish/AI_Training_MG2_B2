@@ -4,4 +4,5 @@ export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
+  attachment_ids?: string[];
 }

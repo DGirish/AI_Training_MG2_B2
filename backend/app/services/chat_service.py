@@ -24,7 +24,7 @@ class ChatService:
 
         try:
             async for token in chain.astream(
-                {"user_message": message},
+                {"history": "", "input": message},
                 config={
                     "metadata": {
                         "user_email": user_context,

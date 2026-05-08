@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import create_access_token, decode_token
 from app.core.config import settings
+from app.core.db_diagnostics import db_unavailable_http_error
 from app.db.session import get_db
 from app.schemas.auth import (
     AuthResponse,
@@ -22,15 +24,8 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 auth_service = AuthService()
 
 
-def _db_unavailable_http_error() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Database unavailable. Check database connectivity and try again.",
-    )
-
-
 @router.post("/signup", response_model=AuthResponse)
-async def signup(data: SignUpRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
+async def signup(data: SignUpRequest, db: Annotated[AsyncSession, Depends(get_db)] = ...) -> AuthResponse:
     try:
         user_id = uuid4()
         profile = await auth_service.sign_up(db, data, user_id)
@@ -46,14 +41,22 @@ async def signup(data: SignUpRequest, db: AsyncSession = Depends(get_db)) -> Aut
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except HTTPException:
         raise
-    except (SQLAlchemyError, OSError):
-        raise _db_unavailable_http_error()
-    except Exception:
-        raise _db_unavailable_http_error()
+    except (SQLAlchemyError, OSError) as exc:
+        raise db_unavailable_http_error(
+            "auth.signup",
+            exc,
+            "Database unavailable. Check database connectivity and try again.",
+        )
+    except Exception as exc:
+        raise db_unavailable_http_error(
+            "auth.signup.unexpected",
+            exc,
+            "Database unavailable. Check database connectivity and try again.",
+        )
 
 
 @router.post("/signin", response_model=AuthResponse)
-async def signin(data: SignInRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
+async def signin(data: SignInRequest, db: Annotated[AsyncSession, Depends(get_db)] = ...) -> AuthResponse:
     try:
         profile = await auth_service.authenticate(db, data.email, data.password)
         if not profile:
@@ -68,10 +71,18 @@ async def signin(data: SignInRequest, db: AsyncSession = Depends(get_db)) -> Aut
         )
     except HTTPException:
         raise
-    except (SQLAlchemyError, OSError):
-        raise _db_unavailable_http_error()
-    except Exception:
-        raise _db_unavailable_http_error()
+    except (SQLAlchemyError, OSError) as exc:
+        raise db_unavailable_http_error(
+            "auth.signin",
+            exc,
+            "Database unavailable. Check database connectivity and try again.",
+        )
+    except Exception as exc:
+        raise db_unavailable_http_error(
+            "auth.signin.unexpected",
+            exc,
+            "Database unavailable. Check database connectivity and try again.",
+        )
 
 
 @router.get("/google/client-id")
@@ -80,7 +91,7 @@ async def google_client_id() -> dict[str, str | None]:
 
 
 @router.post("/google/signin", response_model=AuthResponse)
-async def google_signin(data: GoogleSignInRequest, db: AsyncSession = Depends(get_db)) -> AuthResponse:
+async def google_signin(data: GoogleSignInRequest, db: Annotated[AsyncSession, Depends(get_db)] = ...) -> AuthResponse:
     try:
         profile = await auth_service.sign_in_with_google(db, data.id_token)
 
@@ -95,10 +106,18 @@ async def google_signin(data: GoogleSignInRequest, db: AsyncSession = Depends(ge
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
     except HTTPException:
         raise
-    except (SQLAlchemyError, OSError):
-        raise _db_unavailable_http_error()
-    except Exception:
-        raise _db_unavailable_http_error()
+    except (SQLAlchemyError, OSError) as exc:
+        raise db_unavailable_http_error(
+            "auth.google_signin",
+            exc,
+            "Database unavailable. Check database connectivity and try again.",
+        )
+    except Exception as exc:
+        raise db_unavailable_http_error(
+            "auth.google_signin.unexpected",
+            exc,
+            "Database unavailable. Check database connectivity and try again.",
+        )
 
 
 @router.get("/me", response_model=ProfileResponse)

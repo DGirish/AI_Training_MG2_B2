@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -40,7 +41,7 @@ async def send_message(
     thread_id: UUID,
     payload: MessageRequest,
     token: str | None = None,
-    db: AsyncSession = Depends(get_db),
+    db: Annotated[AsyncSession, Depends(get_db)] = ...,
 ) -> StreamingResponse:
     user_id = _get_current_user_id(token)
 
@@ -57,7 +58,9 @@ async def send_message(
         )
 
     return StreamingResponse(
-        chat_service.stream_chat_with_persistence(db, thread_id, user_id, message),
+        chat_service.stream_chat_with_persistence(
+            db, thread_id, user_id, message, payload.attachment_ids, payload.generate_image
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

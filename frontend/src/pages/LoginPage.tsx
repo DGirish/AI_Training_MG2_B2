@@ -65,11 +65,11 @@ export function LoginPage({ onAuthenticated }: Readonly<LoginPageProps>) {
     }
 
     const initializeGoogleButton = () => {
-      if (!globalThis.google?.accounts?.id || !googleButtonRef.current) {
+      if (!window.google?.accounts?.id || !googleButtonRef.current) {
         return;
       }
 
-      globalThis.google.accounts.id.initialize({
+      window.google.accounts.id.initialize({
         client_id: googleClientId,
         callback: async (response: { credential?: string }) => {
           if (!response.credential) {
@@ -92,7 +92,7 @@ export function LoginPage({ onAuthenticated }: Readonly<LoginPageProps>) {
       });
 
       googleButtonRef.current.innerHTML = "";
-      globalThis.google.accounts.id.renderButton(googleButtonRef.current, {
+      window.google.accounts.id.renderButton(googleButtonRef.current, {
         theme: "outline",
         size: "large",
         text: "continue_with",

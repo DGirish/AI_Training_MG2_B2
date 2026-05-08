@@ -1,12 +1,32 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
-import { createThread, deleteThread, getThread, listThreads, streamChat, updateThread } from "../lib/api";
-import { ChatThread, ChatMessage, User } from "../types/index";
+import {
+  createThread,
+  deleteAttachment,
+  deleteThread,
+  getThread,
+  ingestPdfForRag,
+  listThreads,
+  ragChat,
+  streamChatWithAttachments,
+  updateThread,
+  uploadAttachments,
+} from "../lib/api";
+import { ChatThread, ChatMessage, User, Attachment } from "../types/index";
+import { AttachmentButton, AttachmentPreview, MessageAttachments } from "../components/attachments";
 
 interface ChatPageProps {
   user: User;
   token: string;
   onLogout: () => void;
+}
+
+function formatMessageContent(text: string): string {
+  // Convert **text** to <strong>text</strong>
+  let formatted = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  // Convert line breaks to <br>
+  formatted = formatted.replace(/\n/g, "<br>");
+  return formatted;
 }
 
 function toChatMessages(messages: ChatThread["messages"]): ChatMessage[] {
@@ -15,6 +35,8 @@ function toChatMessages(messages: ChatThread["messages"]): ChatMessage[] {
       id: msg.id,
       role: msg.role,
       content: msg.content,
+      attachment_ids: msg.attachment_ids,
+      attachments: msg.attachments,
     })) ?? []
   );
 }
@@ -46,6 +68,23 @@ function mergeUpdatedThread(existingThreads: ChatThread[], updatedThread: ChatTh
   return merged.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
 }
 
+function patchAttachmentIndexState(
+  list: Attachment[],
+  attachmentId: string,
+  indexedStatus: string,
+  indexingError?: string | null
+): Attachment[] {
+  return list.map((item) => (
+    item.id === attachmentId
+      ? {
+          ...item,
+          indexed_status: indexedStatus,
+          indexing_error: indexingError ?? null,
+        }
+      : item
+  ));
+}
+
 export function ChatPage({ user, token, onLogout }: Readonly<ChatPageProps>) {
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [activeThread, setActiveThread] = useState<ChatThread | null>(null);
@@ -53,13 +92,33 @@ export function ChatPage({ user, token, onLogout }: Readonly<ChatPageProps>) {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [generateImageMode, setGenerateImageMode] = useState(false);
+  const [ragModeByThread, setRagModeByThread] = useState<Record<string, { attachmentId: string; fileName: string }>>({});
+  const [ragBusy, setRagBusy] = useState(false);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
   const hasActiveThread = activeThread !== null;
-  const messageCountLabel =
-    messages.length === 1 ? "1 message" : `${messages.length} messages`;
+  const activeRag = activeThread ? ragModeByThread[activeThread.id] : undefined;
+  const activeRagAttachmentId = activeRag?.attachmentId ?? null;
+  const activeRagFileName = activeRag?.fileName ?? null;
+  let sendButtonLabel = "Send";
+  if (generateImageMode) {
+    sendButtonLabel = "Generate";
+  }
+  if (isLoading) {
+    sendButtonLabel = generateImageMode ? "Generating..." : "Sending...";
+  }
 
   useEffect(() => {
     loadThreads();
   }, []);
+
+  useEffect(() => {
+    if (!messagesRef.current) {
+      return;
+    }
+    messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+  }, [messages, activeThread?.id]);
 
   async function loadThreads() {
     try {
@@ -134,19 +193,35 @@ export function ChatPage({ user, token, onLogout }: Readonly<ChatPageProps>) {
     }
   }
 
+  async function refreshThreadMessages() {
+    if (!activeThread) return;
+    try {
+      const thread = await getThread(token, activeThread.id);
+      setActiveThread(thread);
+      setMessages(toChatMessages(thread.messages));
+      setThreads((prev) => mergeUpdatedThread(prev, thread));
+    } catch {
+      // Ignore refresh failures; current message stream already rendered in UI.
+    }
+  }
+
   async function handleSendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!input.trim() || !activeThread || isLoading) return;
+    if (!input.trim() && attachments.length === 0) return;
+    if (!activeThread || isLoading) return;
 
     const userMessage: ChatMessage = {
       id: Math.random().toString(36).slice(2),
       role: "user",
       content: input,
+      attachment_ids: attachments.map((a) => a.id),
+      attachments,
     };
     const assistantId = Math.random().toString(36).slice(2);
 
     setError(null);
     setInput("");
+    setAttachments([]);
     setIsLoading(true);
     setMessages((prev) => [
       ...prev,
@@ -155,32 +230,123 @@ export function ChatPage({ user, token, onLogout }: Readonly<ChatPageProps>) {
     ]);
 
     try {
-      await streamChat(token, activeThread.id, userMessage.content, {
-        onToken(token) {
-          setMessages((prev) => appendAssistantToken(prev, assistantId, token));
-        },
-        onDone() {
-          setIsLoading(false);
-          getThread(token, activeThread.id)
-            .then((thread) => {
-              setActiveThread(thread);
-              setMessages(toChatMessages(thread.messages));
-              setThreads((prev) => mergeUpdatedThread(prev, thread));
-            })
-            .catch(() => {
-              // Ignore refresh failures; current message stream already rendered in UI.
-            });
-        },
-        onError(messageText) {
-          setError(messageText);
-          setIsLoading(false);
-        },
-      });
+      if (activeRagAttachmentId) {
+        const ragResponse = await ragChat(token, activeThread.id, activeRagAttachmentId, userMessage.content);
+        setMessages((prev) => prev.map((item) => (
+          item.id === assistantId ? { ...item, content: ragResponse.answer } : item
+        )));
+        setIsLoading(false);
+        void refreshThreadMessages();
+      } else {
+        const attachmentIds = attachments.map((a) => a.id);
+        await streamChatWithAttachments(token, activeThread.id, userMessage.content, attachmentIds, {
+          onToken(token) {
+            setMessages((prev) => appendAssistantToken(prev, assistantId, token));
+          },
+          onDone() {
+            setIsLoading(false);
+            void refreshThreadMessages();
+          },
+          onError(messageText) {
+            setError(messageText);
+            setIsLoading(false);
+          },
+        }, generateImageMode);
+      }
+      setGenerateImageMode(false);
     } catch (err) {
       const messageText = err instanceof Error ? err.message : "Unexpected error";
       setError(messageText);
       setIsLoading(false);
     }
+  }
+
+  async function handleRemoveAttachment(attachmentId: string) {
+    try {
+      await deleteAttachment(token, attachmentId);
+      setAttachments((prev) => prev.filter((a) => a.id !== attachmentId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to remove attachment");
+    }
+  }
+
+  async function handleUploadFiles(files: File[]) {
+    if (!activeThread) {
+      setError("Select a thread before uploading files");
+      return;
+    }
+
+    try {
+      const uploaded = await uploadAttachments(token, activeThread.id, files);
+      setAttachments((prev) => [...prev, ...uploaded.attachments]);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to upload files");
+    }
+  }
+
+  function updateAttachmentIndexedStatus(attachmentId: string, indexedStatus: string, indexingError?: string | null) {
+    setMessages((prev) => prev.map((message) => {
+      if (!message.attachments || message.attachments.length === 0) {
+        return message;
+      }
+
+      const nextAttachments = patchAttachmentIndexState(
+        message.attachments,
+        attachmentId,
+        indexedStatus,
+        indexingError
+      );
+
+      return { ...message, attachments: nextAttachments };
+    }));
+
+    setAttachments((prev) => patchAttachmentIndexState(prev, attachmentId, indexedStatus, indexingError));
+  }
+
+  async function handleAskPdf(attachment: Attachment) {
+    if (!activeThread) {
+      setError("Select a thread before enabling PDF mode");
+      return;
+    }
+
+    setError(null);
+    updateAttachmentIndexedStatus(attachment.id, "indexing", null);
+    setRagBusy(true);
+    try {
+      const ingestResponse = await ingestPdfForRag(token, activeThread.id, attachment.id);
+      if (ingestResponse.indexed_status !== "indexed") {
+        throw new Error("PDF indexing did not complete successfully");
+      }
+
+      updateAttachmentIndexedStatus(attachment.id, "indexed", null);
+
+      setRagModeByThread((prev) => ({
+        ...prev,
+        [activeThread.id]: {
+          attachmentId: attachment.id,
+          fileName: attachment.original_filename,
+        },
+      }));
+    } catch (err) {
+      const errorText = err instanceof Error ? err.message : "Failed to enable PDF RAG mode";
+      updateAttachmentIndexedStatus(attachment.id, "failed", errorText);
+      setError(err instanceof Error ? err.message : "Failed to enable PDF RAG mode");
+    } finally {
+      setRagBusy(false);
+    }
+  }
+
+  function handleExitRagMode() {
+    if (!activeThread) {
+      return;
+    }
+
+    setRagModeByThread((prev) => {
+      const next = { ...prev };
+      delete next[activeThread.id];
+      return next;
+    });
   }
 
   return (
@@ -240,17 +406,22 @@ export function ChatPage({ user, token, onLogout }: Readonly<ChatPageProps>) {
       <main className="chat-main">
         {hasActiveThread ? (
           <>
-            <header className="chat-thread-header">
-              <div>
-                <p className="chat-thread-kicker">Active thread</p>
-                <h2>{activeThread.title}</h2>
+            <header className="chat-header-container">
+              <div className="chat-header-content">
+                <h1 className="chat-title">Stackyon AI Chat</h1>
+                <p className="chat-subtitle">Powered by Gemini via LiteLLM</p>
+                {activeRagAttachmentId && activeRagFileName && (
+                  <div className="rag-mode-banner">
+                    <span>RAG mode: Asking {activeRagFileName}</span>
+                    <button type="button" className="rag-exit-btn" onClick={handleExitRagMode}>
+                      Exit
+                    </button>
+                  </div>
+                )}
               </div>
-              <p className="chat-thread-subtitle">
-                {messages.length > 0 ? messageCountLabel : "No messages yet"}
-              </p>
             </header>
 
-            <div className="chat-messages">
+            <div className="chat-messages" ref={messagesRef}>
               {messages.length === 0 ? (
                 <div className="chat-conversation-empty">
                   <h3>Start the conversation</h3>
@@ -259,38 +430,65 @@ export function ChatPage({ user, token, onLogout }: Readonly<ChatPageProps>) {
               ) : (
                 messages.map((msg) => (
                   <div key={msg.id} className={`message-row message-row-${msg.role}`}>
-                    <div className={`message-avatar message-avatar-${msg.role}`}>
-                      {getMessageBadge(msg.role)}
-                    </div>
-                    <div className={`message message-${msg.role}`}>
-                      <div className="message-meta">
-                        <strong>{getMessageLabel(msg.role)}</strong>
+                    <div className={`message-bubble message-bubble-${msg.role}`}>
+                      <div className="message-content">
+                        {msg.role === "assistant" && msg.content && (
+                          <div className="message-text" dangerouslySetInnerHTML={{ __html: formatMessageContent(msg.content) }} />
+                        )}
+                        {msg.role === "user" && <div className="message-text">{msg.content}</div>}
+                        {msg.role === "assistant" && !msg.content && isLoading && (
+                          <div className="message-text">...</div>
+                        )}
                       </div>
-                      <p>{msg.content || (msg.role === "assistant" && isLoading ? "..." : "")}</p>
+                      <MessageAttachments
+                        attachments={msg.attachments ?? []}
+                        token={token}
+                        onAskPdf={handleAskPdf}
+                        activeRagAttachmentId={activeRagAttachmentId}
+                        ragBusy={ragBusy || isLoading}
+                      />
                     </div>
                   </div>
                 ))
               )}
             </div>
 
-            <div className="chat-composer-shell">
-              <div className="chat-composer-copy">
-                <p className="chat-composer-kicker">Message</p>
-                <p className="chat-composer-note">
-                  Ask a follow-up question or continue the active thread.
-                </p>
-              </div>
+            <div className="chat-input-container">
+              {attachments.length > 0 && (
+                <div className="attachment-list">
+                  {attachments.map((attachment) => (
+                    <AttachmentPreview
+                      key={attachment.id}
+                      attachment={attachment}
+                      onRemove={() => handleRemoveAttachment(attachment.id)}
+                    />
+                  ))}
+                </div>
+              )}
 
               <form onSubmit={handleSendMessage} className="chat-input-form">
-                <input
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  placeholder="Type your message"
-                  disabled={isLoading}
-                />
-                <button type="submit" disabled={isLoading || !input.trim()}>
-                  {isLoading ? "Sending..." : "Send"}
-                </button>
+                <div className="chat-input-row">
+                  <AttachmentButton onFilesSelected={handleUploadFiles} onError={(error) => setError(error)} disabled={isLoading} />
+                  <button
+                    type="button"
+                    className={`image-mode-btn ${generateImageMode ? "active" : ""}`}
+                    onClick={() => setGenerateImageMode((prev) => !prev)}
+                    disabled={isLoading}
+                    title="Toggle image generation mode"
+                  >
+                    🎨
+                  </button>
+                  <input
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder={generateImageMode ? "Describe the image you want to generate" : "Type a message..."}
+                    disabled={isLoading}
+                    className="chat-input"
+                  />
+                  <button type="submit" disabled={isLoading || (!input.trim() && attachments.length === 0)} className="send-btn">
+                    {sendButtonLabel}
+                  </button>
+                </div>
               </form>
             </div>
 

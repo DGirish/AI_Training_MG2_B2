@@ -22,4 +22,5 @@ def build_chat_chain():
     prompt = _get_prompt()
     llm = get_chat_llm()
     parser = StrOutputParser()
+    # Expects prompt variables: history, input, and attachment_context.
     return prompt | llm | parser

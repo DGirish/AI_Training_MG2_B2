@@ -18,24 +18,36 @@ class ThreadService:
     def __init__(self) -> None:
         self.thread_naming_service = ThreadNamingService()
 
+    @staticmethod
+    def _normalize_message_attachments(thread: ChatThread) -> None:
+        for message in thread.messages:
+            if message.attachment_ids is None:
+                message.attachment_ids = []
+
     async def get_user_threads(self, db: AsyncSession, user_id: UUID) -> list[ChatThread]:
         stmt = (
             select(ChatThread)
             .where(ChatThread.user_id == user_id)
             .order_by(desc(ChatThread.updated_at))
-            .options(selectinload(ChatThread.messages))
+            .options(selectinload(ChatThread.messages).selectinload(ChatMessage.attachments))
         )
         result = await db.execute(stmt)
-        return result.scalars().unique().all()
+        threads = result.scalars().unique().all()
+        for thread in threads:
+            self._normalize_message_attachments(thread)
+        return threads
 
     async def get_thread_by_id(self, db: AsyncSession, thread_id: UUID, user_id: UUID) -> ChatThread | None:
         stmt = (
             select(ChatThread)
             .where(and_(ChatThread.id == thread_id, ChatThread.user_id == user_id))
-            .options(selectinload(ChatThread.messages))
+            .options(selectinload(ChatThread.messages).selectinload(ChatMessage.attachments))
         )
         result = await db.execute(stmt)
-        return result.scalars().first()
+        thread = result.scalars().first()
+        if thread:
+            self._normalize_message_attachments(thread)
+        return thread
 
     async def create_thread(self, db: AsyncSession, user_id: UUID, data: ThreadCreate) -> ChatThread:
         thread = ChatThread(user_id=user_id, title=data.title)
@@ -66,9 +78,21 @@ class ThreadService:
         return False
 
     async def add_message(
-        self, db: AsyncSession, thread_id: UUID, user_id: UUID, role: str, content: str
+        self,
+        db: AsyncSession,
+        thread_id: UUID,
+        user_id: UUID,
+        role: str,
+        content: str,
+        attachment_ids: list[UUID] | None = None,
     ) -> ChatMessage:
-        message = ChatMessage(thread_id=thread_id, user_id=user_id, role=role, content=content)
+        message = ChatMessage(
+            thread_id=thread_id,
+            user_id=user_id,
+            role=role,
+            content=content,
+            attachment_ids=attachment_ids or [],
+        )
         db.add(message)
         await db.commit()
         await db.refresh(message)
